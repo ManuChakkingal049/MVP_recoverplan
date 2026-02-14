@@ -3,199 +3,214 @@ import pandas as pd
 from copy import deepcopy
 
 st.set_page_config(layout="wide")
-st.title("🏦 Bank Recovery & Survival Horizon MVP")
+st.title("🏦 Bank Recovery Simulator — Balance Sheet Roll Forward")
 
-############################################
-# Sidebar — Opening Balance Sheet
-############################################
+#########################################
+# Sidebar Inputs
+#########################################
 
 st.sidebar.header("Opening Balance Sheet")
 
-assets_input = {
-    "Cash": st.sidebar.number_input("Cash", value=100.0),
-    "HQLA": st.sidebar.number_input("HQLA Securities", value=200.0),
-    "Loans": st.sidebar.number_input("Loans", value=400.0),
-    "RealEstate": st.sidebar.number_input("Real Estate", value=200.0),
+A0 = {
+    "Cash": st.sidebar.number_input("Cash", 100.0),
+    "HQLA": st.sidebar.number_input("HQLA Securities", 200.0),
+    "Loans": st.sidebar.number_input("Loans", 400.0),
+    "RealEstate": st.sidebar.number_input("Real Estate", 200.0),
 }
 
-liabilities_input = {
-    "Deposits": st.sidebar.number_input("Deposits", value=600.0),
-    "Wholesale": st.sidebar.number_input("Wholesale Funding", value=150.0),
+L0 = {
+    "Deposits": st.sidebar.number_input("Deposits", 600.0),
+    "Wholesale": st.sidebar.number_input("Wholesale Funding", 150.0),
 }
 
-############################################
+#########################################
 # Haircuts
-############################################
+#########################################
 
-st.sidebar.header("Liquidation Haircuts")
+st.sidebar.header("Haircuts")
 
 haircuts = {
     "Cash": 0.0,
     "HQLA": st.sidebar.slider("HQLA haircut", 0.0, 0.5, 0.05),
-    "Loans": st.sidebar.slider("Loan sale haircut", 0.0, 0.7, 0.25),
-    "RealEstate": st.sidebar.slider("Real Estate haircut", 0.0, 0.8, 0.35),
+    "Loans": st.sidebar.slider("Loan haircut", 0.0, 0.7, 0.25),
+    "RealEstate": st.sidebar.slider("RE haircut", 0.0, 0.8, 0.35),
 }
 
-############################################
+#########################################
 # Liquidation Priority
-############################################
-
-st.sidebar.header("Liquidation Order")
+#########################################
 
 priority = st.sidebar.multiselect(
-    "Select liquidation priority",
+    "Liquidation Priority",
     ["Cash","HQLA","Loans","RealEstate"],
     default=["Cash","HQLA","Loans","RealEstate"]
 )
 
-############################################
-# Scenario Input
-############################################
+#########################################
+# Withdrawals
+#########################################
 
 st.header("Withdrawal Scenario")
 
-mode = st.radio("Input Mode", ["Manual Input","CSV Upload"])
+txt = st.text_input(
+    "Withdrawals per period (comma-separated, e.g., 50,80,120)",
+    "50,80,120"
+)
 
-if mode == "Manual Input":
-    txt = st.text_input(
-        "Enter withdrawals per period (comma-separated)",
-        "50,80,120"
-    )
-    withdrawals = [float(x) for x in txt.split(",")]
+withdrawals = [float(x) for x in txt.split(",")]
 
-else:
-    file = st.file_uploader("Upload CSV with column named 'withdrawal'")
-    if file:
-        df_up = pd.read_csv(file)
-        withdrawals = df_up["withdrawal"].tolist()
-    else:
-        withdrawals = []
-
-############################################
+#########################################
 # Helper Functions
-############################################
+#########################################
 
 def equity(A,L):
     return sum(A.values()) - sum(L.values())
 
-def calc_LCR(A,outflow):
-    hqla_stock = A["Cash"] + A["HQLA"]*(1-haircuts["HQLA"])
-    return hqla_stock / max(outflow,1)
+def LCR(A,outflow):
+    hqla = A["Cash"] + A["HQLA"]*(1-haircuts["HQLA"])
+    return hqla/max(outflow,1)
 
-def calc_NSFR(A,L):
-    ASF = L["Deposits"]*0.9 + L["Wholesale"]*0.5
-    RSF = A["Loans"]*0.85 + A["RealEstate"]
-    return ASF / max(RSF,1)
-
-############################################
-# Simulation
-############################################
+#########################################
+# Run Simulation
+#########################################
 
 if st.button("Run Simulation"):
 
-    A = deepcopy(assets_input)
-    L = deepcopy(liabilities_input)
+    A = deepcopy(A0)
+    L = deepcopy(L0)
 
-    records=[]
+    # store balance sheets by period
+    bs_history = {}
+
+    # Period 0 (Opening)
+    bs_history["Period 0"] = {
+        **A,
+        **L,
+        "Equity": equity(A,L)
+    }
+
     survival=None
 
     for t,w in enumerate(withdrawals,1):
 
-        openA = A.copy()
-        openL = L.copy()
-
-        # Deposit runoff
+        # Deposit withdrawal
         L["Deposits"] -= w
 
         need = w
-        realized_loss = 0
 
-        # Liquidation process
+        # Liquidate assets
         for asset in priority:
 
-            if need <= 0:
+            if need<=0:
                 break
 
-            available = A[asset]
-            haircut = haircuts[asset]
+            avail=A[asset]
+            h=haircuts[asset]
 
-            if available <= 0:
-                continue
+            sell=min(avail, need/(1-h))
 
-            sell = min(available, need/(1-haircut))
+            A[asset]-=sell
+            cash=sell*(1-h)
+            need-=cash
 
-            A[asset] -= sell
-            cash_generated = sell*(1-haircut)
-
-            realized_loss += sell*haircut
-            need -= cash_generated
-
-        # Metrics
+        # Compute metrics
         e = equity(A,L)
-        lcr = calc_LCR(A,w)
-        nsfr = calc_NSFR(A,L)
+        lcr = LCR(A,w)
 
-        records.append({
-            "Period":t,
-            "Withdrawal":w,
+        # Save balance sheet
+        bs_history[f"Period {t}"] = {
+            **A,
+            **L,
+            "Equity": e
+        }
 
-            # Opening balances
-            "Open_Cash":openA["Cash"],
-            "Open_HQLA":openA["HQLA"],
-            "Open_Loans":openA["Loans"],
-            "Open_RE":openA["RealEstate"],
-
-            # Closing balances
-            "Close_Cash":A["Cash"],
-            "Close_HQLA":A["HQLA"],
-            "Close_Loans":A["Loans"],
-            "Close_RE":A["RealEstate"],
-
-            "Deposits":L["Deposits"],
-            "Wholesale":L["Wholesale"],
-
-            "Equity":e,
-            "LCR":lcr,
-            "NSFR":nsfr,
-            "Realized_Loss":realized_loss
-        })
-
-        # Survival triggers
-        if e <= 0 or lcr < 1 or sum(A.values()) <= 0:
-            survival = t
+        # Survival trigger
+        if e<=0 or lcr<1:
+            survival=t
             break
 
-    df = pd.DataFrame(records)
+    #########################################
+    # Create Balance Sheet Table
+    #########################################
 
-############################################
-# Outputs
-############################################
+    df = pd.DataFrame(bs_history)
+
+    # Order rows nicely
+    order = [
+        "Cash","HQLA","Loans","RealEstate",
+        "Deposits","Wholesale",
+        "Equity"
+    ]
+
+    df = df.loc[order]
+
+    # Add Balance Check row
+    asset_rows = ["Cash","HQLA","Loans","RealEstate"]
+    liab_eq_rows = ["Deposits","Wholesale","Equity"]
+
+    df.loc["Check (Assets - Liabilities+Equity)"] = df.loc[asset_rows].sum() - df.loc[liab_eq_rows].sum()
+
+    #########################################
+    # Display Balance Sheet
+    #########################################
 
     st.subheader("📊 Balance Sheet Roll-Forward")
     st.dataframe(df, use_container_width=True)
 
-    col1,col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Liquidity Metrics")
-        st.line_chart(
-            df.set_index("Period")[["LCR","NSFR"]]
-        )
-
-    with col2:
-        st.subheader("Equity Path")
-        st.line_chart(
-            df.set_index("Period")["Equity"]
-        )
-
-    st.subheader("Asset Depletion (Closing Balances)")
-    st.area_chart(
-        df.set_index("Period")[
-            ["Close_Cash","Close_HQLA","Close_Loans","Close_RE"]
-        ]
-    )
+    #########################################
+    # Survival Output
+    #########################################
 
     if survival:
         st.error(f"⚠️ Survival Horizon = {survival} periods")
     else:
         st.success("✅ Bank survives all periods")
+
+    #########################################
+    # Narrative Explanation
+    #########################################
+
+    st.subheader("📖 Period-wise Narrative Explanation")
+
+    narrative = []
+    prev_A = deepcopy(A0)
+    prev_L = deepcopy(L0)
+
+    for t,col in enumerate(df.columns):
+
+        if col.startswith("Period"):
+            curr_A = {k: df.loc[k,col] for k in ["Cash","HQLA","Loans","RealEstate"]}
+            curr_L = {k: df.loc[k,col] for k in ["Deposits","Wholesale"]}
+
+            # Withdrawal for this period
+            w = withdrawals[t-1] if t>0 and t-1<len(withdrawals) else 0
+
+            # Assets sold
+            sold_assets=[]
+            for asset in priority:
+                delta = prev_A[asset] - curr_A[asset]
+                if delta>0:
+                    sold_assets.append(f"{delta:.2f} {asset}")
+
+            # Equity change
+            equity_change = df.loc["Equity",col] - df.loc["Equity","Period 0"] if t==0 else df.loc["Equity",col] - prev_A["Cash"] - prev_A["HQLA"] - prev_A["Loans"] - prev_A["RealEstate"] + prev_L["Deposits"] + prev_L["Wholesale"] # approximate
+
+            line = f"**{col}:** Withdrawal={w}. "
+            if sold_assets:
+                line += f"Liquidated {'; '.join(sold_assets)}. "
+            else:
+                line += "No asset liquidation required. "
+            line += f"Closing Equity={df.loc['Equity',col]:.2f}. "
+            line += f"Balance Sheet Check (Assets-Liabilities+Equity)={df.loc['Check (Assets - Liabilities+Equity)',col]:.2f}"
+
+            # Survival trigger explanation
+            if survival and survival==t:
+                line += " ⚠️ Survival breach occurs here."
+
+            narrative.append(line)
+
+            prev_A = curr_A
+            prev_L = curr_L
+
+    for line in narrative:
+        st.markdown(line)
